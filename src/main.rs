@@ -1,6 +1,6 @@
 use std::{fs::File, io::Write, path::Path};
 
-use nalgebra::{point, vector, Isometry3, Point3, Quaternion, UnitQuaternion};
+use nalgebra::{point, vector, Isometry3, Point3, Quaternion, UnitQuaternion, IsometryMatrix3};
 use rapier3d::parry::transformation::vhacd::{VHACDParameters, VHACD};
 
 use clap::Parser;
@@ -92,19 +92,18 @@ fn convert_and_write(path_in: &str, path_out: &str, args: Args) {
                     params.max_convex_hulls = args.max_hulls;
 
                     // Apply transform
-                    let scale_comp = node.transform().decomposed().2;
                     let translation = node.transform().decomposed().0;
                     let rotation = node.transform().decomposed().1;
-                    let quat = Quaternion::new(rotation[0], rotation[1], rotation[2], rotation[3]);
+                    let scale_comp = node.transform().decomposed().2;
+
+                    // The order returned by decompose is different for some reason. Rip my sanity.
+                    let quat = Quaternion::new(rotation[3], rotation[0], rotation[1], rotation[2]);
                     let eulers = UnitQuaternion::from_quaternion(quat).euler_angles();
 
-                    let iso = Isometry3::new(
-                        vector![translation[0], translation[1], translation[2]],
-                        vector![eulers.0, eulers.1, eulers.2],
-                    );
-
-                    // Apply rotation and position
-                    verts = verts.iter().map(|v| iso.transform_point(v)).collect();
+                    println!("quat of {} is {:?}", node.name().unwrap_or("no name: "), quat);
+                    println!("eulers of {} is {:?}", node.name().unwrap_or("no name: "), eulers);
+                    println!("translation of {} is {:?}", node.name().unwrap_or("no name: "), translation);
+                    println!("scale of {} is {:?}\n", node.name().unwrap_or("no name: "), scale_comp);
 
                     // Apply scale
                     verts = verts
@@ -118,6 +117,15 @@ fn convert_and_write(path_in: &str, path_out: &str, args: Args) {
                         })
                         .collect();
 
+                    let iso = Isometry3::new(
+                        vector![translation[0], translation[1], translation[2]],
+                        vector![eulers.0, eulers.1, eulers.2],
+                    );
+
+                    // Apply rotation and position
+                    verts = verts.iter().map(|v| iso.transform_point(v)).collect();
+
+                    // TODO: Option to combine all meshes before decomposing
                     let decomp = VHACD::decompose(&params, &verts, &tris, true);
 
                     for (vertices, indices) in decomp.compute_exact_convex_hulls(&verts, &tris) {
