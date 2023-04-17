@@ -1,7 +1,10 @@
 use std::{fs::File, io::Write, path::Path};
 
-use nalgebra::{point, vector, Isometry3, Point3, Quaternion, UnitQuaternion, IsometryMatrix3};
-use rapier3d::parry::transformation::vhacd::{VHACDParameters, VHACD};
+use nalgebra::{point, vector, Isometry3, Point3, Quaternion, UnitQuaternion};
+use rapier3d::parry::transformation::{
+    vhacd::{VHACDParameters, VHACD},
+    voxelization::FillMode,
+};
 
 use clap::Parser;
 use serde::{Deserialize, Serialize};
@@ -25,6 +28,10 @@ struct Args {
     #[arg(short, long, default_value_t = 1024)]
     max_hulls: u32,
 
+    /// Voxel resolution
+    #[arg(short, long, default_value_t = 128)]
+    voxel_resolution: u32,
+
     /// Log the output files on creation
     #[arg(short, long, default_value_t = true)]
     log_success: bool,
@@ -32,6 +39,10 @@ struct Args {
     /// Output as a single json file
     #[arg(short, long, default_value_t = false)]
     json_only: bool,
+
+    /// Combine meshes before voxelization
+    #[arg(short, long, default_value_t = false)]
+    combine_meshes: bool,
 }
 
 fn main() {
@@ -52,7 +63,15 @@ fn convert_and_write(path_in: &str, path_out: &str, args: Args) {
     let output_path = Path::new(&path_out);
 
     let (gltf, buffers, _) = gltf::import(input_path).unwrap();
-    let mut shapes = Vec::new();
+    let mut all_shapes = Vec::new();
+    let mut shape_names: Vec<String> = Vec::new();
+
+    let mut params = VHACDParameters::default();
+    params.max_convex_hulls = args.max_hulls;
+    params.fill_mode = FillMode::FloodFill {
+        detect_cavities: true,
+    };
+    params.resolution = args.voxel_resolution;
 
     for scene in gltf.scenes() {
         for node in scene.nodes() {
@@ -87,10 +106,6 @@ fn convert_and_write(path_in: &str, path_out: &str, args: Args) {
                         tris.push(t);
                     }
 
-                    let mut parts: Vec<(Vec<Point3<f32>>, Vec<[u32; 3]>)> = Vec::new();
-                    let mut params = VHACDParameters::default();
-                    params.max_convex_hulls = args.max_hulls;
-
                     // Apply transform
                     let translation = node.transform().decomposed().0;
                     let rotation = node.transform().decomposed().1;
@@ -99,11 +114,6 @@ fn convert_and_write(path_in: &str, path_out: &str, args: Args) {
                     // The order returned by decompose is different for some reason. Rip my sanity.
                     let quat = Quaternion::new(rotation[3], rotation[0], rotation[1], rotation[2]);
                     let eulers = UnitQuaternion::from_quaternion(quat).euler_angles();
-
-                    println!("quat of {} is {:?}", node.name().unwrap_or("no name: "), quat);
-                    println!("eulers of {} is {:?}", node.name().unwrap_or("no name: "), eulers);
-                    println!("translation of {} is {:?}", node.name().unwrap_or("no name: "), translation);
-                    println!("scale of {} is {:?}\n", node.name().unwrap_or("no name: "), scale_comp);
 
                     // Apply scale
                     verts = verts
@@ -125,41 +135,68 @@ fn convert_and_write(path_in: &str, path_out: &str, args: Args) {
                     // Apply rotation and position
                     verts = verts.iter().map(|v| iso.transform_point(v)).collect();
 
-                    // TODO: Option to combine all meshes before decomposing
-                    let decomp = VHACD::decompose(&params, &verts, &tris, true);
-
-                    for (vertices, indices) in decomp.compute_exact_convex_hulls(&verts, &tris) {
-                        parts.push((vertices.clone(), indices.clone()));
-                        shapes.push((vertices.clone(), indices.clone())); // I know, I know..
-                    }
-
-                    if args.json_only {
-                        continue;
-                    }
-
-                    for (i, shape) in parts.into_iter().enumerate() {
-                        let name = m.name().unwrap_or("New Obj").to_owned() + &i.to_string();
-                        let append = &args.clone().append.unwrap_or("-shape".to_owned());
-                        match write_mesh_to_obj(output_path, &name, append, shape, &args) {
-                            Ok(_) => {}
-                            Err(e) => eprintln!("{}", e),
-                        }
-                    }
+                    let name = m.name().unwrap_or("New Obj").to_owned();
+                    all_shapes.push((verts, tris));
+                    shape_names.push(name);
                 }
                 None => {}
             }
         }
     }
+
+    let mut shape_vec_composed = Vec::new();
     let append = &args.append.clone().unwrap_or("-shape".to_owned());
-    let name = input_path
-        .file_name()
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
-    match write_meshes_to_json(output_path, &name, append, shapes, &args) {
-        Ok(_) => {}
-        Err(e) => eprintln!("{}", e),
+
+    if args.combine_meshes {
+        let mut verts: Vec<Point3<f32>> = Vec::new();
+        let mut tris: Vec<[u32; 3]> = Vec::new();
+        for (i, v) in all_shapes.iter_mut().enumerate() {
+            verts.append(&mut v.0);
+            tris.append(&mut v.1);
+
+            let default_name = "Unknown Shape".to_owned();
+            let shape_name_base = shape_names.get(i).unwrap_or(&default_name);
+            println!("[Combine] Appending shape {}", shape_name_base);
+        }
+
+        shape_vec_composed.push((verts, tris));
+    } else {
+        shape_vec_composed.append(&mut all_shapes);
+    }
+
+    let mut json_vec_decomposed = Vec::new();
+    // There will only be one shape if combine meshes is true
+    for (i, s) in shape_vec_composed.iter().enumerate() {
+        let decomp = VHACD::decompose(&params, &s.0, &s.1, true);
+        let decomposed_hulls = decomp.compute_exact_convex_hulls(&s.0, &s.1);
+
+        let default_name = "Unknown Shape".to_owned();
+        let hull_name_base = shape_names.get(i).unwrap_or(&default_name);
+
+        if !args.json_only {
+            for (hull_i, hull) in decomposed_hulls.into_iter().enumerate() {
+                let name_w_index = format!("{}{}", hull_name_base, hull_i);
+                match write_mesh_to_obj(output_path, &name_w_index, append, hull, &args) {
+                    Ok(_) => {}
+                    Err(e) => eprintln!("{}", e),
+                }
+            }
+        } else {
+            json_vec_decomposed.append(&mut decomposed_hulls.clone());
+        }
+    }
+
+    if args.json_only {
+        let name = input_path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        match write_meshes_to_json(output_path, &name, append, json_vec_decomposed, &args) {
+            Ok(_) => {}
+            Err(e) => eprintln!("{}", e),
+        }
     }
 }
 
@@ -213,7 +250,7 @@ fn write_meshes_to_json(
     }
 
     if args.log_success {
-        println!("Writing file {:?}", &filename);
+        println!("[DONE] Writing file {:?}", &filename);
     }
 
     let json = serde_json::to_string_pretty(&ShapeCollection {
@@ -253,15 +290,14 @@ fn write_mesh_to_obj(
 
     let mut file = File::create(&filename)?;
 
+    if args.log_success {
+        println!("[DONE] Writing file {:?}", &filename);
+    }
     for line in file_cont {
         file.write(line.as_bytes())
             .expect("Failed to write to file.");
         file.write("\n".as_bytes())
             .expect("Failed to write to file.");
-    }
-
-    if args.log_success {
-        println!("Writing file {:?}", &filename);
     }
 
     Ok(())
