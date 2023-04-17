@@ -4,9 +4,8 @@ use nalgebra::{point, vector, Isometry3, Point3, Quaternion, UnitQuaternion};
 use rapier3d::parry::transformation::vhacd::{VHACDParameters, VHACD};
 
 use clap::Parser;
-use serde::{Deserialize, Serialize, __private::de};
+use serde::{Deserialize, Serialize};
 
-/// Simple program to greet a person
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 struct Args {
