@@ -1,10 +1,10 @@
 use std::{fs::File, io::Write, path::Path};
 
-use nalgebra::{point, Point3};
+use nalgebra::{point, vector, Isometry3, Point3, Quaternion, UnitQuaternion};
 use rapier3d::parry::transformation::vhacd::{VHACDParameters, VHACD};
 
 use clap::Parser;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, __private::de};
 
 /// Simple program to greet a person
 #[derive(Parser, Debug, Clone)]
@@ -91,6 +91,34 @@ fn convert_and_write(path_in: &str, path_out: &str, args: Args) {
                     let mut parts: Vec<(Vec<Point3<f32>>, Vec<[u32; 3]>)> = Vec::new();
                     let mut params = VHACDParameters::default();
                     params.max_convex_hulls = args.max_hulls;
+
+                    // Apply transform
+                    let scale_comp = node.transform().decomposed().2;
+                    let translation = node.transform().decomposed().0;
+                    let rotation = node.transform().decomposed().1;
+                    let quat = Quaternion::new(rotation[0], rotation[1], rotation[2], rotation[3]);
+                    let eulers = UnitQuaternion::from_quaternion(quat).euler_angles();
+
+                    let iso = Isometry3::new(
+                        vector![translation[0], translation[1], translation[2]],
+                        vector![eulers.0, eulers.1, eulers.2],
+                    );
+
+                    // Apply rotation and position
+                    verts = verts.iter().map(|v| iso.transform_point(v)).collect();
+
+                    // Apply scale
+                    verts = verts
+                        .iter()
+                        .map(|v| {
+                            point![
+                                v.x * scale_comp[0],
+                                v.y * scale_comp[1],
+                                v.z * scale_comp[2]
+                            ]
+                        })
+                        .collect();
+
                     let decomp = VHACD::decompose(&params, &verts, &tris, true);
 
                     for (vertices, indices) in decomp.compute_exact_convex_hulls(&verts, &tris) {
@@ -181,8 +209,10 @@ fn write_meshes_to_json(
         println!("Writing file {:?}", &filename);
     }
 
-    let json =
-        serde_json::to_string_pretty(&serde_shapes).expect("Failed to serialize shape data.");
+    let json = serde_json::to_string_pretty(&ShapeCollection {
+        shapes: serde_shapes,
+    })
+    .expect("Failed to serialize shape data.");
     file.write_all(json.as_bytes())
         .expect("Failed to write json to disk.");
 
