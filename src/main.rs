@@ -150,18 +150,20 @@ fn convert_and_write(path_in: &str, path_out: &str, args: Args) {
     if args.combine_meshes {
         let mut verts: Vec<Point3<f32>> = Vec::new();
         let mut tris: Vec<[u32; 3]> = Vec::new();
-        for (i, v) in all_shapes.iter_mut().enumerate() {
-            verts.append(&mut v.0);
-            tris.append(&mut v.1);
+        for (i, v) in all_shapes.into_iter().enumerate() {
+            verts.extend(&v.0);
+            tris.extend(&v.1);
 
             let default_name = "Unknown Shape".to_owned();
             let shape_name_base = shape_names.get(i).unwrap_or(&default_name);
             println!("[Combine] Appending shape {}", shape_name_base);
         }
 
-        shape_vec_composed.push((verts, tris));
+        let item = (verts, tris);
+        shape_vec_composed.push(item);
     } else {
-        shape_vec_composed.append(&mut all_shapes);
+        let cloned = all_shapes.iter().cloned();
+        shape_vec_composed.extend(cloned);
     }
 
     let mut json_vec_decomposed = Vec::new();
